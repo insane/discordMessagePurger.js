@@ -52,21 +52,20 @@
 
     let _token = null;
 
+    // A real user token is three url-safe-base64 segments: <id>.<timestamp>.<hmac>.
+    // Discord also sends OAuth "Bearer ..." and "Bot ..." tokens on /api/ requests
+    // (embedded activities, connections, upsells) and plants decoy webpack modules;
+    // both are rejected (401) on your messages. Every source is shape-checked so only
+    // a genuine account token is ever used.
+    const TOKEN_RE = /^[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{15,}$/;
+    const isToken = v => typeof v === "string" && TOKEN_RE.test(v.trim()) && !/^(bot|bearer)\s/i.test(v.trim());
+
     // Primary source: capture your token from Discord's own API requests. This is
     // decoy-proof and works even when Discord has cleared it from localStorage.
     (function hookToken() {
-        // A real user token is three url-safe-base64 segments: <id>.<timestamp>.<hmac>.
-        // Discord also sends OAuth "Bearer ..." and "Bot ..." tokens on /api/ requests
-        // (embedded activities, connections, upsells); those are scoped and 401 on your
-        // messages, so we must NOT grab them. Only lock onto the genuine account token.
-        const TOKEN_RE = /^[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{15,}$/;
-        const grab = v => {
-            if (_token || typeof v !== "string") return;
-            const t = v.trim();
-            if (/^(bot|bearer)\s/i.test(t)) return;
-            if (!TOKEN_RE.test(t)) return;
-            _token = t;
-        };
+        // Keep the LATEST real token seen, not the first (an early request may carry a
+        // scoped value); the shape check keeps Bearer/Bot/decoy values out.
+        const grab = v => { if (isToken(v)) _token = v.trim(); };
         // Patch the PAGE's objects (unsafeWindow under Tampermonkey), not the sandbox
         // wrapper, so Discord's own requests actually pass through the hook.
         try {
@@ -92,9 +91,33 @@
         } catch (e) { }
     })();
 
-    function getToken() {
-        if (_token) return _token;
-        // fallback: the iframe localStorage trick (works on builds that keep the token there)
+    // Second source: pull getToken() out of Discord's own webpack modules. Discord
+    // plants decoy modules that also expose getToken but return junk, so we validate
+    // the shape of everything and keep only a real token.
+    function readWebpackToken() {
+        try {
+            const wp = w.webpackChunkdiscord_app;
+            if (!wp || typeof wp.push !== "function") return null;
+            let cache;
+            wp.push([["pb_" + Math.random().toString(36).slice(2)], {}, req => { cache = req && req.c; }]);
+            if (!cache) return null;
+            for (const id in cache) {
+                let exp;
+                try { exp = cache[id] && cache[id].exports; } catch (e) { continue; }
+                if (!exp) continue;
+                for (const c of [exp, exp.default, exp.Z, exp.ZP]) {
+                    if (c && typeof c.getToken === "function") {
+                        let t; try { t = c.getToken(); } catch (e) { continue; }
+                        if (isToken(t)) return t.trim();
+                    }
+                }
+            }
+        } catch (e) { }
+        return null;
+    }
+
+    // Third source: the iframe localStorage trick (works on builds that keep the token there).
+    function readIframeToken() {
         const f = document.createElement("iframe");
         f.style.display = "none";
         document.body.appendChild(f);
@@ -102,17 +125,36 @@
         try { t = f.contentWindow.localStorage.getItem("token"); } catch (e) { }
         f.remove();
         if (t && t[0] === '"') { try { t = JSON.parse(t); } catch (e) { } }
-        _token = t || _token;
-        return _token;
+        return isToken(t) ? t.trim() : null;
     }
 
-    async function apiFetch(path, { method = "GET", query, body } = {}) {
-        const token = getToken();
-        if (!token) throw new Error("Couldn't read your token. Reload Discord and try again.");
+    function getToken(force) {
+        if (!force && isToken(_token)) return _token;
+        const fresh = readWebpackToken() || readIframeToken();
+        if (fresh) { _token = fresh; return _token; }
+        if (force) return null;                        // re-read failed: don't reuse a rejected token
+        return isToken(_token) ? _token : null;
+    }
+
+    async function apiFetch(path, opts = {}) {
+        const { method = "GET", query, body } = opts;
         const qs = query ? "?" + new URLSearchParams(query) : "";
-        const headers = { authorization: token };
-        if (body) headers["content-type"] = "application/json";
-        return fetch(API + path + qs, { method, headers, credentials: "include", body: body ? JSON.stringify(body) : undefined });
+        const send = tok => {
+            const headers = { authorization: tok };
+            if (body) headers["content-type"] = "application/json";
+            return fetch(API + path + qs, { method, headers, credentials: "include", body: body ? JSON.stringify(body) : undefined });
+        };
+        const token = getToken();
+        if (!token) throw new Error("Couldn't read your token. Fully reload Discord (Ctrl+R) and try again.");
+        let res = await send(token);
+        if (res.status === 401) {
+            // The token we used was rejected. Re-read from a fresh source (the first may
+            // have been an early/scoped value) and try once more before giving up.
+            const fresh = getToken(true);
+            if (fresh && fresh !== token) res = await send(fresh);
+            else throw new Error("Discord rejected the token (401). Fully reload Discord (Ctrl+R) so the script can re-read it, then run this again.");
+        }
+        return res;
     }
 
     let _myId = null;
