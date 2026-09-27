@@ -13,15 +13,6 @@
 // @grant        GM_getValue
 // ==/UserScript==
 
-/*
- * WORKS ON: web Discord (discord.com) in a browser with Tampermonkey.
- * Does NOT work in the Discord desktop app (extensions can't inject there).
- *
- * Requests go out as same-origin fetches from your logged-in Discord tab, so
- * they carry your real session, IP and browser fingerprint and look like normal
- * in-app deletes, not like the Python selfbot that got you logged out.
- */
-
 (function () {
     "use strict";
 
@@ -52,9 +43,6 @@
 
     let _token = null, _myId = null;
 
-    // Update the cached token, and forget the cached user id whenever it actually
-    // changes (e.g. you logged out and into a different account) so we never search
-    // one account with another's id/token.
     function setToken(v) {
         if (!isToken(v)) return false;
         const t = v.trim();
@@ -62,22 +50,13 @@
         return true;
     }
 
-    // A real user token is three url-safe-base64 segments: <id>.<timestamp>.<hmac>.
-    // Discord also sends OAuth "Bearer ..." and "Bot ..." tokens on /api/ requests
-    // (embedded activities, connections, upsells) and plants decoy webpack modules;
-    // both are rejected (401) on your messages. Every source is shape-checked so only
-    // a genuine account token is ever used.
     const TOKEN_RE = /^[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{15,}$/;
     const isToken = v => typeof v === "string" && TOKEN_RE.test(v.trim()) && !/^(bot|bearer)\s/i.test(v.trim());
 
-    // Primary source: capture your token from Discord's own API requests. This is
-    // decoy-proof and works even when Discord has cleared it from localStorage.
     (function hookToken() {
-        // Keep the LATEST real token seen, not the first (an early request may carry a
-        // scoped value); the shape check keeps Bearer/Bot/decoy values out.
+
         const grab = v => { setToken(v); };
-        // Patch the PAGE's objects (unsafeWindow under Tampermonkey), not the sandbox
-        // wrapper, so Discord's own requests actually pass through the hook.
+
         try {
             const of = w.fetch;
             w.fetch = function (input, init) {
@@ -101,9 +80,6 @@
         } catch (e) { }
     })();
 
-    // Second source: pull getToken() out of Discord's own webpack modules. Discord
-    // plants decoy modules that also expose getToken but return junk, so we validate
-    // the shape of everything and keep only a real token.
     function readWebpackToken() {
         try {
             const wp = w.webpackChunkdiscord_app;
@@ -126,7 +102,6 @@
         return null;
     }
 
-    // Third source: the iframe localStorage trick (works on builds that keep the token there).
     function readIframeToken() {
         const f = document.createElement("iframe");
         f.style.display = "none";
@@ -142,7 +117,7 @@
         if (!force && isToken(_token)) return _token;
         const fresh = readWebpackToken() || readIframeToken();
         if (fresh) { setToken(fresh); return _token; }
-        if (force) return null;                        // re-read failed: don't reuse a rejected token
+        if (force) return null;
         return isToken(_token) ? _token : null;
     }
 
@@ -158,8 +133,7 @@
         if (!token) throw new Error("Couldn't read your token. Fully reload Discord (Ctrl+R) and try again.");
         let res = await send(token);
         if (res.status === 401) {
-            // The token we used was rejected. Re-read from a fresh source (the first may
-            // have been an early/scoped value) and try once more before giving up.
+
             const fresh = getToken(true);
             if (fresh && fresh !== token) res = await send(fresh);
             else throw new Error("Discord rejected the token (401). Fully reload Discord (Ctrl+R) so the script can re-read it, then run this again.");
@@ -174,8 +148,8 @@
         return _myId;
     }
 
-    let forcedChannelId = null, forcedGuildId = null; // set when opened from a right-click menu
-    let ctxChannelId = null, ctxGuildId = null;       // captured at the last right-click
+    let forcedChannelId = null, forcedGuildId = null;
+    let ctxChannelId = null, ctxGuildId = null;
     function currentContext() {
         if (forcedChannelId) return { guildId: forcedGuildId, channelId: forcedChannelId };
         const m = location.pathname.match(/channels\/(@me|\d+)\/(\d+)/);
@@ -243,8 +217,6 @@
         };
     }
 
-    // Route the scan: for your own messages in a guild channel, use search (jumps
-    // straight to your messages instead of reading the whole channel history).
     async function scanTargets(opts, log, onScan) {
         const ctx = currentContext();
         if (!opts.everyone && ctx && ctx.guildId) return scanTargetsViaSearch(opts, ctx, log, onScan);
@@ -258,7 +230,7 @@
         const base = ctx.guildId ? `/guilds/${ctx.guildId}/messages/search` : `/channels/${ctx.channelId}/messages/search`;
         if (onScan) onScan(0, 0);
         const ids = [];
-        const seen = new Set();      // dedup: buckets carry context messages that overlap across pages
+        const seen = new Set();
         let offset = 0, done = false;
         while (!done && !aborted) {
             if (offset >= 9900) break;
@@ -275,8 +247,8 @@
             if (!buckets.length) break;
             for (const bk of buckets) {
                 for (const m of bk) {
-                    if (!m.author || m.author.id !== me) continue;   // skip context messages from others
-                    if (seen.has(m.id)) continue;                    // stale duplicate across overlapping pages
+                    if (!m.author || m.author.id !== me) continue;
+                    if (seen.has(m.id)) continue;
                     seen.add(m.id);
                     if (untilId && m.id === untilId) { done = true; break; }
                     if (!pass(m)) continue;
@@ -286,7 +258,7 @@
             }
             if (onScan) onScan(seen.size, ids.length);
             offset += 25;
-            if (buckets.length < 25) break;                          // fewer than a full page of hits: end
+            if (buckets.length < 25) break;
         }
         if (opts.oldestFirst) ids.reverse();
         return { channelId: ctx.channelId, ids };
@@ -355,13 +327,13 @@
         let netFails = 0, attempts = 0;
         while (true) {
             if (aborted) return "skipped";
-            if (++attempts > 12) return "skipped"; // give up on one stubborn message
+            if (++attempts > 12) return "skipped";
             let res;
             try {
                 res = await apiFetch(`/channels/${channelId}/messages/${messageId}`, { method: "DELETE" });
             } catch (e) {
-                if (e && /token/i.test(e.message)) throw e; // token gone: abort the run
-                if (++netFails >= 4) return "skipped";       // transient network error
+                if (e && /token/i.test(e.message)) throw e;
+                if (++netFails >= 4) return "skipped";
                 await sleep(1500);
                 continue;
             }
@@ -385,7 +357,6 @@
     let aborted = false;
     function stopPurge() { aborted = true; }
 
-    // ----- global (account-wide) mode: delete your messages everywhere via search
     const GLOBAL_DELETABLE = [0, 19, 20, 21, 23];
     async function globalSearchPage(me, offset, log) {
         const body = { tabs: { messages: { sort_by: "timestamp", sort_order: "desc", author_id: [me], limit: 25, offset } }, track_exact_total_hits: true };
@@ -408,8 +379,6 @@
         return { total: 0, msgs: [] };
     }
 
-    // The search can transiently report 0 (reindexing) or on a failed request; never
-    // trust a single zero — retry a few times before believing it.
     async function remainingTotal(me, log) {
         let total = 0;
         for (let i = 0; i < 4 && !aborted; i++) {
@@ -452,7 +421,7 @@
             let progressed = false;
             for (const m of page.msgs) {
                 if (aborted) break;
-                if (seen.has(m.id)) continue; // stale duplicate from a lagging index
+                if (seen.has(m.id)) continue;
                 seen.add(m.id);
                 const deletable = m.author && m.author.id === me && m.type !== 3 && GLOBAL_DELETABLE.includes(m.type);
                 if (!deletable) { skipped++; continue; }
@@ -462,16 +431,14 @@
             }
             if (onScan) onScan(seen.size, deleted);
             if (progressed) { offset = 0; stall = 0; continue; }
-            // No new deletions this page. Ask the search how many of your messages it
-            // still reports, and only stop once that count actually stops going down.
+
             offset += 25;
             remaining = await remainingTotal(me, log);
             report();
-            if (remaining <= 0) break;                       // nothing left
+            if (remaining <= 0) break;
             if (remaining < lastRemaining) stall = 0; else stall++;
             lastRemaining = remaining;
-            // Be very patient while a lot still remains (reindex lag / deep offsets);
-            // give up sooner only when just a few remain (likely undeletable system messages).
+
             const cap = remaining > 20 ? 70 : 12;
             if (stall >= cap) break;
             await sleep(remaining > 20 ? 5000 : 3000);
@@ -610,7 +577,7 @@
         if (activeModal) { activeModal.expand(); return; }
         ensureStyles();
         if (modalEl) modalEl.remove();
-        document.querySelectorAll(".pb-overlay, .pb-pill").forEach(e => e.remove()); // clear any element still animating out
+        document.querySelectorAll(".pb-overlay, .pb-pill").forEach(e => e.remove());
 
         const saved = loadSettings();
         const st = {
@@ -938,8 +905,7 @@
                 logLine(`Ready to delete ${n} message(s). This cannot be undone.`);
                 const done = val => { cancelConfirm = null; confirmBtn.remove(); backBtn.remove(); startBtn.style.display = ""; resolve(val); };
                 cancelConfirm = () => done(false);
-                // Confirm is the deliberate "go". Clear any Stop that landed during the
-                // scan/confirm phase (e.g. from the minimized pill) so deletion isn't wedged.
+
                 confirmBtn.onclick = () => { aborted = false; stopBtn.style.display = ""; done(true); };
                 backBtn.onclick = () => done(false);
             });
@@ -993,7 +959,6 @@
         toolbar.insertBefore(btn, toolbar.firstChild);
     }
 
-    // Capture which channel/DM was right-clicked so the menu item can target it.
     let ctxAt = 0;
     document.addEventListener("contextmenu", e => {
         const link = e.target.closest && e.target.closest('a[href*="/channels/"], [data-list-item-id*="channels"]');
@@ -1016,8 +981,7 @@
     }
 
     function injectContextItem() {
-        // Only on an actual right-click context menu (not hover action bars/popouts),
-        // and only right after the right-click that captured the channel.
+
         if (!ctxChannelId || Date.now() - ctxAt > 2500) return;
         const menu = document.querySelector('[role="menu"][id*="context"]');
         if (!menu || menu.querySelector(".purgebot-ctx")) return;
@@ -1033,8 +997,6 @@
         const sub = item.querySelector('[class*="subtext"]');
         if (sub) sub.remove();
 
-        // Match Discord's highlight: it toggles a "focused_<hash>" class (not :hover),
-        // and only one item is focused at a time.
         const itemCls = [...template.classList].find(c => /^item_/.test(c));
         const FOCUSED = itemCls ? "focused_" + itemCls.slice(5) : null;
         if (FOCUSED) {
@@ -1043,8 +1005,7 @@
                 const ownMenu = item.closest('[role="menu"]') || menu;
                 ownMenu.querySelectorAll("." + FOCUSED).forEach(el => el.classList.remove(FOCUSED));
                 item.classList.add(FOCUSED);
-                // collapse any open submenu (e.g. Mute duration), like a native item does:
-                // tell Discord the expanded parent is unhovered, then drop the leftover popover.
+
                 ownMenu.querySelectorAll('[aria-haspopup="true"][aria-expanded="true"]').forEach(el => {
                     el.dispatchEvent(new MouseEvent("mouseleave", { bubbles: false, relatedTarget: document.body }));
                     el.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body }));
