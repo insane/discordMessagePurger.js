@@ -44,7 +44,17 @@
     function saveSettings(s) { try { storageSet("purgebot", JSON.stringify(s)); } catch (e) { } }
     function loadSettings() { try { const v = storageGet("purgebot"); if (v) return JSON.parse(v); } catch (e) { } return {}; }
 
-    let _token = null;
+    let _token = null, _myId = null;
+
+    // Update the cached token, and forget the cached user id whenever it actually
+    // changes (e.g. you logged out and into a different account) so we never search
+    // one account with another's id/token.
+    function setToken(v) {
+        if (!isToken(v)) return false;
+        const t = v.trim();
+        if (t !== _token) { _token = t; _myId = null; }
+        return true;
+    }
 
     // A real user token is three url-safe-base64 segments: <id>.<timestamp>.<hmac>.
     // Discord also sends OAuth "Bearer ..." and "Bot ..." tokens on /api/ requests
@@ -59,7 +69,7 @@
     (function hookToken() {
         // Keep the LATEST real token seen, not the first (an early request may carry a
         // scoped value); the shape check keeps Bearer/Bot/decoy values out.
-        const grab = v => { if (isToken(v)) _token = v.trim(); };
+        const grab = v => { setToken(v); };
         // Patch the PAGE's objects (unsafeWindow under Tampermonkey), not the sandbox
         // wrapper, so Discord's own requests actually pass through the hook.
         try {
@@ -125,7 +135,7 @@
     function getToken(force) {
         if (!force && isToken(_token)) return _token;
         const fresh = readWebpackToken() || readIframeToken();
-        if (fresh) { _token = fresh; return _token; }
+        if (fresh) { setToken(fresh); return _token; }
         if (force) return null;                        // re-read failed: don't reuse a rejected token
         return isToken(_token) ? _token : null;
     }
@@ -151,7 +161,6 @@
         return res;
     }
 
-    let _myId = null;
     async function getMyId() {
         if (_myId) return _myId;
         const me = await (await apiFetch("/users/@me")).json();
